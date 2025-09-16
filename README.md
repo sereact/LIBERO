@@ -182,3 +182,35 @@ If you find **LIBERO** to be useful in your own research, please consider citing
 |------------------|-------------------------------------------------------------------------------------------------------------------------------------|
 | Codebase         | [MIT License](LICENSE)                                                                                                                      |
 | Datasets         | [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/legalcode)                 |
+
+
+
+# Denis notes 
+
+## Test train run 
+```
+python libero/lifelong/main.py \                                                                                                                       
+  seed=100\                                                                 
+  benchmark_name=LIBERO_SPATIAL\                                            
+  policy=bc_rnn_policy\                                                     
+  lifelong=base\                                                            
+  train.n_epochs=1 \                                                         
+  eval.eval_every=1 \                                                        
+  eval.n_eval=3 \                                         
+  train.num_workers=0 \                                       
+  eval.num_workers=0 \                                  
+  eval.use_mp=false
+```
+
+## Test evaluation run 
+```
+python libero/lifelong/evaluate.py \
+  --benchmark libero_spatial \
+  --task_id 0 \
+  --algo base \
+  --policy bc_rnn_policy \
+  --seed 100 \
+  --load_task 0 \
+  --device_id 0 \
+  --save-videos
+```

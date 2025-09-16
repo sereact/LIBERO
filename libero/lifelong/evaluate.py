@@ -2,6 +2,17 @@ import argparse
 import sys
 import os
 
+# ---- minimal fix: use spawn + force headless EGL before any GL imports ----
+import multiprocessing as _mp
+try:
+    _mp.set_start_method("spawn", force=True)
+except RuntimeError:
+    # already set by another module / previous run
+    pass
+
+# ---------------------------------------------------------------------------
+
+
 # TODO: find a better way for this?
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import hydra
@@ -240,7 +251,8 @@ def main():
             "camera_widths": cfg.data.img_w,
         }
 
-        env_num = 20
+        # env_num = 20
+        env_num = 1
         env = SubprocVectorEnv(
             [lambda: OffScreenRenderEnv(**env_args) for _ in range(env_num)]
         )
@@ -303,3 +315,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                                                               

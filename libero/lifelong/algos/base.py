@@ -137,12 +137,21 @@ class Sequential(nn.Module, metaclass=AlgoMeta):
             self.experiment_dir, f"task{task_id}_model.pth"
         )
 
+        # train_dataloader = DataLoader(
+        #     dataset,
+        #     batch_size=self.cfg.train.batch_size,
+        #     num_workers=self.cfg.train.num_workers,
+        #     sampler=RandomSampler(dataset),
+        #     persistent_workers=True,
+        # )
+
+        persistent = self.cfg.train.num_workers > 0
         train_dataloader = DataLoader(
             dataset,
             batch_size=self.cfg.train.batch_size,
             num_workers=self.cfg.train.num_workers,
-            sampler=RandomSampler(dataset),
-            persistent_workers=True,
+            shuffle=True,
+            persistent_workers=persistent,
         )
 
         prev_success_rate = -1.0
