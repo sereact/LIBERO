@@ -160,6 +160,20 @@ class OffScreenRenderEnv(ControlEnv):
         kwargs["has_offscreen_renderer"] = True
         super().__init__(**kwargs)
 
+    # >>> added passthrough properties so higher-level code can access camera info
+    @property
+    def camera_names(self):
+        return getattr(self.env, "camera_names", None)
+
+    @property
+    def camera_widths(self):
+        return getattr(self.env, "camera_widths", None)
+
+    @property
+    def camera_heights(self):
+        return getattr(self.env, "camera_heights", None)
+    # <<< end added
+
 
 class SegmentationRenderEnv(OffScreenRenderEnv):
     """

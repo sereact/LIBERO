@@ -249,7 +249,51 @@ def main():
             ),
             "camera_heights": cfg.data.img_h,
             "camera_widths": cfg.data.img_w,
+            "camera_depths": True,
         }
+
+        # >>> added: pre-compute camera intrinsics using a temporary single env
+        temp_env = OffScreenRenderEnv(**env_args)
+        cam_intrinsics = {}
+        # Some setups pass a single int instead of list; normalize to list
+        if isinstance(temp_env.camera_names, str):
+            camera_names_iter = [temp_env.camera_names]
+        else:
+            camera_names_iter = list(temp_env.camera_names)
+
+        # Likewise normalize widths / heights to lists
+        def to_list(x, n):
+            if isinstance(x, (list, tuple)):
+                return list(x)
+            return [x for _ in range(n)]
+
+        widths = to_list(temp_env.camera_widths, len(camera_names_iter))
+        heights = to_list(temp_env.camera_heights, len(camera_names_iter))
+
+        for cam in camera_names_iter:
+            cam_id = temp_env.sim.model.camera_name2id(cam)
+            fovy_deg = float(temp_env.sim.model.cam_fovy[cam_id])  # vertical field of view in degrees
+            idx = camera_names_iter.index(cam)
+            width = int(widths[idx])
+            height = int(heights[idx])
+            fovy_rad = np.deg2rad(fovy_deg)
+            # Using vertical fov: fy = (H/2) / tan(fovy/2); fx scaled by aspect ratio
+            fy = 0.5 * height / np.tan(fovy_rad / 2.0)
+            fx = fy * (width / height)
+            cam_intrinsics[cam] = {
+                "camera_name": cam,
+                "image_width": width,
+                "image_height": height,
+                "fovy_deg": fovy_deg,
+                "focal_length_px": {"fx": float(fx), "fy": float(fy)},
+                "intrinsic_matrix_K": [
+                    [float(fx), 0.0, width / 2.0],
+                    [0.0, float(fy), height / 2.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        temp_env.close()
+        # >>> end added block
 
         # env_num = 20
         env_num = 1
@@ -272,6 +316,12 @@ def main():
         obs = env.set_init_state(init_states_)
         task_emb = benchmark.get_task_emb(args.task_id)
 
+        # >>> added: attach intrinsics to initial obs
+        for k in range(env_num):
+            # Store a shared reference (avoid deep copy); change key name if you prefer
+            obs[k]["camera_intrinsics"] = cam_intrinsics
+        # >>> end added
+
         num_success = 0
         for _ in range(5):  # simulate the physics without any actions
             env.step(np.zeros((env_num, 7)))
@@ -283,6 +333,13 @@ def main():
                 data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
                 actions = algo.policy.get_action(data)
                 obs, reward, done, info = env.step(actions)
+
+                # >>> added: attach intrinsics to initial obs
+                for k in range(env_num):
+                    # Store a shared reference (avoid deep copy); change key name if you prefer
+                    obs[k]["camera_intrinsics"] = cam_intrinsics
+                # >>> end added
+
                 video_writer.append_vector_obs(
                     obs, dones, camera_name="agentview_image"
                 )
