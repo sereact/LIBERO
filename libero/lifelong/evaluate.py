@@ -57,6 +57,17 @@ import robomimic.utils.tensor_utils as TensorUtils
 
 import time
 
+# from types import SimpleNamespace
+from attrdict import AttrDict
+
+# Add this small helper near the top (after imports)
+def _dict_to_obj(d):
+    if isinstance(d, dict):
+        return AttrDict(**{k: _dict_to_obj(v) for k, v in d.items()})
+    elif isinstance(d, list):
+        return [_dict_to_obj(x) for x in d]
+    else:
+        return d
 
 benchmark_map = {
     "libero_10": "LIBERO_10",
@@ -77,6 +88,7 @@ policy_map = {
     "bc_rnn_policy": "BCRNNPolicy",
     "bc_transformer_policy": "BCTransformerPolicy",
     "bc_vilt_policy": "BCViLTPolicy",
+    "external_api_policy": "ExternalAPIPolicy",
 }
 
 
@@ -102,7 +114,7 @@ def parse_args():
         "--policy",
         type=str,
         required=True,
-        choices=["bc_rnn_policy", "bc_transformer_policy", "bc_vilt_policy"],
+        choices=["bc_rnn_policy", "bc_transformer_policy", "bc_vilt_policy", "external_api_policy"],
     )
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--ep", type=int)
@@ -147,6 +159,7 @@ def main():
                 experiment_id = folder_id
         except BaseException:
             pass
+    
     if experiment_id == 0:
         print(f"[error] cannot find the checkpoint under {experiment_dir}")
         sys.exit(0)
@@ -164,9 +177,18 @@ def main():
                 model_path, map_location=args.device_id
             )
     except:
-        print(f"[error] cannot find the checkpoint at {str(model_path)}")
-        sys.exit(0)
-
+        if args.policy == "external_api_policy":
+            cfg_json = os.path.join(run_folder, "config.json")
+            with open(cfg_json, "r") as f:
+                cfg = _dict_to_obj(json.load(f))
+            
+            sd = {}
+            previous_mask = {}
+            print(f"[info] no checkpoint found, proceeding with ExternalAPIPolicy using config.json from {cfg_json}")
+        else:
+            print(f"[error] cannot find the checkpoint at {str(model_path)}")
+            sys.exit(0)
+        
     cfg.folder = get_libero_path("datasets")
     cfg.bddl_folder = get_libero_path("bddl_files")
     cfg.init_states_folder = get_libero_path("init_states")
@@ -250,6 +272,7 @@ def main():
             "camera_heights": cfg.data.img_h,
             "camera_widths": cfg.data.img_w,
             "camera_depths": True,
+            "controller": "JOINT_VELOCITY" if cfg.policy == "external_api_policy" else "OSC_POSE",
         }
 
         # >>> added: pre-compute camera intrinsics using a temporary single env
@@ -324,12 +347,14 @@ def main():
 
         num_success = 0
         for _ in range(5):  # simulate the physics without any actions
-            env.step(np.zeros((env_num, 7)))
+            ac_dim = cfg.shape_meta.ac_dim
+            env.step(np.zeros((env_num, ac_dim)))
 
         with torch.no_grad():
             while steps < cfg.eval.max_steps:
                 steps += 1
 
+                # TODO: save previous observation
                 data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
                 actions = algo.policy.get_action(data)
                 obs, reward, done, info = env.step(actions)

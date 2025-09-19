@@ -18,3 +18,5 @@ libero.egg-info/
 .vscode/
 
 .venv
+.venv_lerobot
+lerobot

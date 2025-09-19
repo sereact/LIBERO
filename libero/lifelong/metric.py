@@ -16,6 +16,66 @@ from libero.libero.utils.video_utils import VideoWriter
 from libero.lifelong.utils import *
 
 
+import torch
+
+def raw_obs_to_tensor_lerobot_obs(obs, task_lang: str, cfg):
+    """
+    Hardcoded, single-env converter:
+      - observation.state: 2 x DOF (t-0.1s, t)
+      - observation.images.wrist1: CHW in [0,1] from robot0_eye_in_hand_image
+      - observation.images.static1: CHW in [0,1] from agentview_image
+      - observation.depths.static1: 1HW from agentview_depth
+      - observation.intrinsics.static1: 3x3 from camera_intrinsics["agentview"]["intrinsic_matrix_K"]
+      - observation.task_instr: task_lang
+      - dataset_info: fixed strings / flags
+    """
+    dt = 0.1
+
+    # --- single env only ---
+    env_num = len(obs)
+    assert env_num == 1, "LERobot currently only supports single environment."
+    obs = obs[0]  # dict
+
+    # --- state (two timepoints, 0.1s apart) ---
+    joint_pos = obs["robot0_joint_pos"]
+    joint_vel = obs["robot0_joint_vel"]
+    state_t_minus = joint_pos - dt * joint_vel
+    state_t = joint_pos
+    state = torch.stack([state_t_minus, state_t], dim=0)  # [2, dof]
+
+    # --- wrist1 image (eye-in-hand): HWC -> CHW, [0,1] ---
+    wrist_img = obs["robot0_eye_in_hand_image"]
+
+    # --- static1 rgb (front/agentview): HWC -> CHW, [0,1] ---
+    static_img = obs["agentview_image"]
+    
+    # --- static1 depth: to 1 x H x W, keep native scale ---
+    depth = obs["agentview_depth"]
+    
+    # --- intrinsics for static1 from camera_intrinsics["agentview"] ---
+    cam_intr = obs["camera_intrinsics"]
+    K = cam_intr["agentview"]["intrinsic_matrix_K"]
+    
+    # --- assemble output dict ---
+    data = {
+        "observation.state": state,                               # [2, dof]
+        "observation.images.wrist1": wrist_img,                   # [C,H,W]
+        "observation.images.static1": static_img,                 # [C,H,W]
+        "observation.depths.static1": depth,                      # [1,H,W]
+        "observation.intrinsics.static1": K,                      # [3,3]
+        "observation.task_instr": task_lang,                      # str
+        "dataset_info": {
+            "action_type": "joint_velocity",
+            "robot_embodiment": "single_arm",
+            "robot_type": "Panda",
+            "stereo_replace_depth": True,
+            "handheld": False,
+            "no_state": False,
+        },
+    }
+    return data
+
+
 def raw_obs_to_tensor_obs(obs, task_emb, cfg):
     """
     Prepare the tensor observations as input for the algorithm.
