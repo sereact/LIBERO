@@ -41,6 +41,7 @@ from libero.lifelong.metric import (
     evaluate_loss,
     evaluate_success,
     raw_obs_to_tensor_obs,
+    raw_obs_to_tensor_lerobot_obs,
 )
 from libero.lifelong.utils import (
     control_seed,
@@ -272,7 +273,7 @@ def main():
             "camera_heights": cfg.data.img_h,
             "camera_widths": cfg.data.img_w,
             "camera_depths": True,
-            "controller": "JOINT_VELOCITY" if cfg.policy == "external_api_policy" else "OSC_POSE",
+            # "controller": "JOINT_VELOCITY" if cfg.policy == "external_api_policy" else "OSC_POSE",
         }
 
         # >>> added: pre-compute camera intrinsics using a temporary single env
@@ -338,6 +339,7 @@ def main():
         steps = 0
         obs = env.set_init_state(init_states_)
         task_emb = benchmark.get_task_emb(args.task_id)
+        task_lang = task.language
 
         # >>> added: attach intrinsics to initial obs
         for k in range(env_num):
@@ -348,15 +350,22 @@ def main():
         num_success = 0
         for _ in range(5):  # simulate the physics without any actions
             ac_dim = cfg.shape_meta.ac_dim
-            env.step(np.zeros((env_num, ac_dim)))
+            prev_obs, _, _, _ = env.step(np.zeros((env_num, ac_dim)))
 
         with torch.no_grad():
             while steps < cfg.eval.max_steps:
                 steps += 1
 
-                # TODO: save previous observation
-                data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
+                if args.policy == "external_api_policy":
+                    data = raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang)
+                else:
+                    data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
+                
                 actions = algo.policy.get_action(data)
+
+                actions = actions[:, 0, :]
+
+                prev_obs = obs
                 obs, reward, done, info = env.step(actions)
 
                 # >>> added: attach intrinsics to initial obs

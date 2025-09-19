@@ -18,7 +18,7 @@ from libero.lifelong.utils import *
 
 import torch
 
-def raw_obs_to_tensor_lerobot_obs(obs, task_lang: str, cfg):
+def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
     """
     Hardcoded, single-env converter:
       - observation.state: 2 x DOF (t-0.1s, t)
@@ -29,32 +29,30 @@ def raw_obs_to_tensor_lerobot_obs(obs, task_lang: str, cfg):
       - observation.task_instr: task_lang
       - dataset_info: fixed strings / flags
     """
-    dt = 0.1
 
     # --- single env only ---
     env_num = len(obs)
     assert env_num == 1, "LERobot currently only supports single environment."
     obs = obs[0]  # dict
+    prev_obs = prev_obs[0]
 
     # --- state (two timepoints, 0.1s apart) ---
-    joint_pos = obs["robot0_joint_pos"]
-    joint_vel = obs["robot0_joint_vel"]
-    state_t_minus = joint_pos - dt * joint_vel
-    state_t = joint_pos
-    state = torch.stack([state_t_minus, state_t], dim=0)  # [2, dof]
+    joint_pos = torch.from_numpy(obs["robot0_joint_pos"])
+    joint_pos_prev = torch.from_numpy(prev_obs["robot0_joint_pos"])
+    state = torch.stack([joint_pos, joint_pos_prev], dim=0)  # [2, dof]
 
     # --- wrist1 image (eye-in-hand): HWC -> CHW, [0,1] ---
-    wrist_img = obs["robot0_eye_in_hand_image"]
+    wrist_img = torch.from_numpy(obs["robot0_eye_in_hand_image"]).permute(2, 0, 1) / 255.0
 
     # --- static1 rgb (front/agentview): HWC -> CHW, [0,1] ---
-    static_img = obs["agentview_image"]
+    static_img = torch.from_numpy(obs["agentview_image"]).permute(2, 0, 1) / 255.0
     
     # --- static1 depth: to 1 x H x W, keep native scale ---
-    depth = obs["agentview_depth"]
+    depth = torch.from_numpy(obs["agentview_depth"]).permute(2, 0, 1)
     
     # --- intrinsics for static1 from camera_intrinsics["agentview"] ---
     cam_intr = obs["camera_intrinsics"]
-    K = cam_intr["agentview"]["intrinsic_matrix_K"]
+    K = torch.tensor(cam_intr["agentview"]["intrinsic_matrix_K"])
     
     # --- assemble output dict ---
     data = {
@@ -71,6 +69,7 @@ def raw_obs_to_tensor_lerobot_obs(obs, task_lang: str, cfg):
             "stereo_replace_depth": True,
             "handheld": False,
             "no_state": False,
+            "action_dof": 7,
         },
     }
     return data

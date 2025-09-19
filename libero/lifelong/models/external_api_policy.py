@@ -8,16 +8,65 @@ import numpy as np
 import requests
 import msgpack
 from libero.lifelong.models.base_policy import BasePolicy
+from libero.lifelong.models.lerobot_messaging import (
+    decoder_data, 
+    encoder_data,
+    json_like_encoder
+)
 
-def pack_msg(obj: Dict[str, Any]) -> bytes:
-    # Convert Python dict into msgpack bytes
-    return msgpack.packb(obj, use_bin_type=True)
+def envelope(msg: Any) -> Dict:
+    """Wrap a message in an envelope. Just a dict for future json serialization.
+
+    Args:
+        msg (Any): Any serializable message, might be (int,string,float,list,dict,tuple)
+
+    Returns:
+        dict: Returns the msg wrapped in an envelope.
+    """
+    return {"payload": msg, "monotonic_time": time.monotonic()}
 
 
-def unpack_msg(buf: bytes) -> Dict[str, Any]:
-    # Convert msgpack bytes back into Python dict
-    return msgpack.unpackb(buf, raw=False)
+def rm_envelope(msg: dict) -> Any:
+    """Remove the envelope from a message.
 
+    Args:
+        msg (dict): The wrapped message
+
+    Returns:
+        Any: The payload of the message
+    """
+    return msg["payload"]
+
+
+def pack_msg(msg: Any, json_like=False) -> bytes:
+    """Packs msg to a bytearray following the msgpack specification.
+
+    Args:
+        msg (Any): Any message to send.
+
+    Returns:
+        bytearray: [description]
+    """
+    encoder = json_like_encoder if json_like else encoder_data
+    msg = envelope(msg)  # Wrap message in an envelope
+    return msgpack.packb(msg, default=encoder, use_bin_type=True)  # Pack to byte array using msgpack
+
+
+def unpack_msg(packed: bytes, with_header: bool = False) -> Any:
+    """Unpack an image message message.
+
+    Args:
+        packed (bytearray): bytearray containin a msgpack message
+    """
+    unpacked = msgpack.unpackb(
+        packed, raw=False, object_hook=decoder_data
+    )
+    if with_header:
+        if isinstance(unpacked["monotonic_time"], list):
+            unpacked["monotonic_time"] = unpacked["monotonic_time"][0]
+        return unpacked
+    else:
+        return rm_envelope(unpacked)
 
 class LerobotPolicyClient:
     """
@@ -104,145 +153,18 @@ class ExternalAPIPolicy(BasePolicy):
     def __init__(self, cfg, shape_meta=None):
         super().__init__(cfg, shape_meta)
         # Device from cfg if provided (e.g., "cuda:0")
-        self.device = getattr(cfg, "device", "cpu")
-        # Policy config overrides (Hydra style): cfg.policy may exist
-        pconf = getattr(cfg, "policy", None)
 
-        # Allow overrides from env vars or cfg
-        server_url = None
+        server_url = "http://localhost:8000"
         timeout = 30.0
-
-        if pconf is not None:
-            # If passed via policy.external_api.server_url or policy.server_url
-            server_url = getattr(pconf, "server_url", None) or getattr(pconf, "external_api", None)
-            if isinstance(server_url, (dict,)):
-                server_url = server_url.get("server_url", None)
-            timeout = float(getattr(pconf, "timeout", 30.0))
-
-        # Also allow env var override
-        server_url = os.environ.get("EXTERNAL_POLICY_SERVER_URL", server_url or "http://localhost:8000")
-        timeout = float(os.environ.get("EXTERNAL_POLICY_TIMEOUT", timeout))
 
         self.client = LerobotPolicyClient(server_url=server_url, timeout=timeout)
 
         # Keep shape_meta if needed downstream; not strictly required for remote calls
         self.shape_meta = shape_meta
 
-    def to(self, device):
-        self.device = device if isinstance(device, str) else str(device)
-        return super().to(device)
-
-    def _build_obs_payload(self, batch: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Convert input batch tensors to a serializable observation dictionary
-        for the external server. We take the last time step for sequence inputs.
-        """
-        payload: Dict[str, Any] = {}
-
-        def tensor_to_np(t: Optional[torch.Tensor]) -> Optional[np.ndarray]:
-            if t is None:
-                return None
-            t = _tensor_last_step(t)  # [B, ...] or [...]
-            if t.is_cuda:
-                t = t.detach().cpu()
-            return t.numpy() if isinstance(t, torch.Tensor) else t
-
-        # Images: convert CHW to HWC uint8 if necessary
-        for key in ["agentview_rgb", "eye_in_hand_rgb"]:
-            if key in batch and batch[key] is not None:
-                t = _tensor_last_step(batch[key])  # [B, C, H, W] or [C, H, W]
-                if isinstance(t, torch.Tensor):
-                    if t.dim() == 5:
-                        # [B, T, C, H, W] -> handled by _tensor_last_step => [B, C, H, W]
-                        pass
-                    if t.is_cuda:
-                        t = t.detach().cpu()
-                    arr = t.numpy()
-                else:
-                    arr = t
-                # If batch present, take B=1 by default for evaluation
-                arr = _maybe_first(arr)
-                # Convert to HWC for typical servers
-                if arr.ndim == 3 and arr.shape[0] in (1, 3):
-                    # assume CHW, move to HWC
-                    arr = np.transpose(arr, (1, 2, 0))
-                # Scale to uint8 if float in [0,1]
-                if arr.dtype != np.uint8:
-                    arr = np.clip(arr, 0.0, 1.0) * 255.0 if arr.dtype.kind == "f" else arr
-                    arr = arr.astype(np.uint8)
-                payload[key] = _to_serializable_array(arr)
-
-        # Low-dim states
-        for key_in, key_out in [
-            ("joint_states", "joint_states"),
-            ("gripper_states", "gripper_states"),
-            ("proprio", "proprio"),  # if your batch uses a combined proprio key
-        ]:
-            if key_in in batch and batch[key_in] is not None:
-                arr = tensor_to_np(batch[key_in])
-                arr = _maybe_first(arr)
-                if arr is not None:
-                    payload[key_out] = _to_serializable_array(np.asarray(arr))
-
-        # Task / language embeddings if present
-        if "task_emb" in batch and batch["task_emb"] is not None:
-            arr = tensor_to_np(batch["task_emb"])
-            arr = _maybe_first(arr)
-            if arr is not None:
-                payload["task_emb"] = _to_serializable_array(np.asarray(arr))
-
-        if "lang" in batch and batch["lang"] is not None:
-            arr = tensor_to_np(batch["lang"])
-            arr = _maybe_first(arr)
-            if arr is not None:
-                payload["lang"] = _to_serializable_array(np.asarray(arr))
-
-        return payload
-
-    @torch.no_grad()
-    def forward(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass that delegates to the external API.
-        For batch size > 1, this loops over batch items.
-        Returns:
-            {"action": torch.FloatTensor [B, A]}
-        """
-        # Normalize to a list of per-sample payloads
-        # We attempt to infer batch size from any present tensor
-        bsz = None
-        for v in batch.values():
-            if isinstance(v, torch.Tensor):
-                # Could be [B, T, ...] or [B, ...]
-                if v.dim() >= 1:
-                    bsz = v.shape[0]
-                    break
-        if bsz is None:
-            bsz = 1
-
-        actions = []
-        if bsz == 1:
-            payload = self._build_obs_payload(batch)
-            result = self.client.predict(payload)
-            act = np.asarray(result.get("action", []), dtype=np.float32)
-            actions.append(torch.from_numpy(act).to(self.device))
-        else:
-            # Split along batch dimension and call the server per item
-            for i in range(bsz):
-                one = {}
-                for k, v in batch.items():
-                    if isinstance(v, torch.Tensor) and v.dim() >= 1 and v.shape[0] == bsz:
-                        one[k] = v[i:i+1]
-                    else:
-                        one[k] = v
-                payload = self._build_obs_payload(one)
-                result = self.client.predict(payload)
-                act = np.asarray(result.get("action", []), dtype=np.float32)
-                actions.append(torch.from_numpy(act).to(self.device))
-
-        # Stack to [B, A]; if server returns 1D action we ensure correct shape
-        actions = [a.view(1, -1) if a.dim() == 1 else a for a in actions]
-        action_tensor = torch.cat(actions, dim=0)
-        return {"action": action_tensor}
+    def get_action(self, data):
+        action = self.client.predict(data)
+        return action.unsqueeze(0).cpu().numpy()
 
     def close(self):
         self.client.close()
