@@ -103,38 +103,6 @@ class LerobotPolicyClient:
             pass
 
 
-def _to_serializable_array(x: np.ndarray) -> Any:
-    """
-    Make numpy array JSON/msgpack-friendly. Using .tolist() here for maximum
-    compatibility with typical Python servers. If you control the server and want
-    speed, switch to bytes + shape/dtype metadata.
-    """
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    return x
-
-
-def _tensor_last_step(t: torch.Tensor) -> torch.Tensor:
-    """
-    Given a tensor shaped [B, T, ...], return the last time-step [B, ...].
-    If tensor has shape [B, ...], returns as-is.
-    """
-    if t.dim() >= 3:
-        return t[:, -1]
-    return t
-
-
-def _maybe_first(elem: Any) -> Any:
-    """
-    If elem has a batch dimension (e.g., [B, ...]) and B==1, strip it.
-    """
-    if isinstance(elem, np.ndarray) and elem.ndim >= 1 and elem.shape[0] == 1:
-        return elem[0]
-    if isinstance(elem, list) and len(elem) == 1:
-        return elem[0]
-    return elem
-
-
 class ExternalAPIPolicy(BasePolicy):
     """
     A LIBERO-compatible policy that delegates action computation to an external server.
@@ -150,7 +118,7 @@ class ExternalAPIPolicy(BasePolicy):
     Forward returns a dict:
       { "action": torch.FloatTensor of shape [B, A] }
     """
-    def __init__(self, cfg, shape_meta=None):
+    def __init__(self, cfg, shape_meta=None, use_buffer=True):
         super().__init__(cfg, shape_meta)
         # Device from cfg if provided (e.g., "cuda:0")
 
@@ -162,9 +130,23 @@ class ExternalAPIPolicy(BasePolicy):
         # Keep shape_meta if needed downstream; not strictly required for remote calls
         self.shape_meta = shape_meta
 
+        self.use_buffer = use_buffer
+        self._buffer = torch.tensor([[]])
+        self._i = 0
+
     def get_action(self, data):
-        action = self.client.predict(data)
-        return action.unsqueeze(0).cpu().numpy()
+        
+        if not self.use_buffer or self._i == self._buffer.shape[1]:
+            self._buffer = self.client.predict(data)
+            self._i = 0
+
+        if self.use_buffer:
+            action = self._buffer[:, self._i, :]
+            self._i += 1
+        else: 
+            action = self._buffer[:, 0, :]
+
+        return action.cpu().numpy()
 
     def close(self):
         self.client.close()

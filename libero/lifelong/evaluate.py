@@ -319,8 +319,9 @@ def main():
         temp_env.close()
         # >>> end added block
 
-        # env_num = 20
-        env_num = 1
+        env_num = 20
+        # env_num = 1
+
         env = SubprocVectorEnv(
             [lambda: OffScreenRenderEnv(**env_args) for _ in range(env_num)]
         )
@@ -362,9 +363,6 @@ def main():
                     data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
                 
                 actions = algo.policy.get_action(data)
-
-                actions = actions[:, 0, :]
-
                 prev_obs = obs
                 obs, reward, done, info = env.step(actions)
 

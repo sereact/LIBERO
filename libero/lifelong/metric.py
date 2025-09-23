@@ -20,48 +20,65 @@ import torch
 
 def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
     """
-    Hardcoded, single-env converter:
-      - observation.state: 2 x DOF (t-0.1s, t)
-      - observation.images.wrist1: CHW in [0,1] from robot0_eye_in_hand_image
-      - observation.images.static1: CHW in [0,1] from agentview_image
-      - observation.depths.static1: 1HW from agentview_depth
-      - observation.intrinsics.static1: 3x3 from camera_intrinsics["agentview"]["intrinsic_matrix_K"]
-      - observation.task_instr: task_lang
-      - dataset_info: fixed strings / flags
+    Multi-env converter:
+      - observation.state: [env, 2, DOF] (t, t-0.1s)
+      - observation.images.wrist1: [env, C, H, W] in [0,1] from robot0_eye_in_hand_image
+      - observation.images.static1: [env, C, H, W] in [0,1] from agentview_image
+      - observation.depths.static1: [env, 1, H, W] from agentview_depth
+      - observation.intrinsics.static1: [env, 3, 3] from camera_intrinsics["agentview"]["intrinsic_matrix_K"]
+      - observation.task_instr: [env] list[str], one per env (same string repeated if shared)
+      - dataset_info: fixed dict (not batched)
     """
-
-    # --- single env only ---
     env_num = len(obs)
-    assert env_num == 1, "LERobot currently only supports single environment."
-    obs = obs[0]  # dict
-    prev_obs = prev_obs[0]
+    assert len(prev_obs) == env_num, "prev_obs must have the same length as obs"
 
-    # --- state (two timepoints, 0.1s apart) ---
-    joint_pos = torch.from_numpy(obs["robot0_joint_pos"])
-    joint_pos_prev = torch.from_numpy(prev_obs["robot0_joint_pos"])
-    state = torch.stack([joint_pos, joint_pos_prev], dim=0)  # [2, dof]
+    states = []
+    wrist_imgs = []
+    static_imgs = []
+    depths = []
+    Ks = []
+    # prepare per-env tensors
+    for k in range(env_num):
+        o = obs[k]
+        p = prev_obs[k]
 
-    # --- wrist1 image (eye-in-hand): HWC -> CHW, [0,1] ---
-    wrist_img = torch.from_numpy(obs["robot0_eye_in_hand_image"]).permute(2, 0, 1) / 255.0
+        # state [2, dof]
+        joint_pos = torch.from_numpy(o["robot0_joint_pos"]).float()
+        joint_pos_prev = torch.from_numpy(p["robot0_joint_pos"]).float()
+        state = torch.stack([joint_pos, joint_pos_prev], dim=0)
+        states.append(state)
 
-    # --- static1 rgb (front/agentview): HWC -> CHW, [0,1] ---
-    static_img = torch.from_numpy(obs["agentview_image"]).permute(2, 0, 1) / 255.0
-    
-    # --- static1 depth: to 1 x H x W, keep native scale ---
-    depth = torch.from_numpy(obs["agentview_depth"]).permute(2, 0, 1)
-    
-    # --- intrinsics for static1 from camera_intrinsics["agentview"] ---
-    cam_intr = obs["camera_intrinsics"]
-    K = torch.tensor(cam_intr["agentview"]["intrinsic_matrix_K"])
-    
-    # --- assemble output dict ---
+        # wrist1 image [C,H,W] in [0,1]
+        wrist_img = torch.from_numpy(o["robot0_eye_in_hand_image"]).permute(2, 0, 1).float() / 255.0
+        wrist_imgs.append(wrist_img)
+
+        # static1 rgb [C,H,W] in [0,1]
+        static_img = torch.from_numpy(o["agentview_image"]).permute(2, 0, 1).float() / 255.0
+        static_imgs.append(static_img)
+
+        # static1 depth [1,H,W]
+        depth = torch.from_numpy(o["agentview_depth"]).permute(2, 0, 1).float()
+        depths.append(depth)
+
+        # intrinsics [3,3]
+        cam_intr = o["camera_intrinsics"]
+        K = torch.tensor(cam_intr["agentview"]["intrinsic_matrix_K"]).float()
+        Ks.append(K)
+
+    # stack along batch dimension
+    states = torch.stack(states, dim=0)            # [env, 2, dof]
+    wrist_imgs = torch.stack(wrist_imgs, dim=0)    # [env, C, H, W]
+    static_imgs = torch.stack(static_imgs, dim=0)  # [env, C, H, W]
+    depths = torch.stack(depths, dim=0)            # [env, 1, H, W]
+    Ks = torch.stack(Ks, dim=0)                    # [env, 3, 3]
+
     data = {
-        "observation.state": state,                               # [2, dof]
-        "observation.images.wrist1": wrist_img,                   # [C,H,W]
-        "observation.images.static1": static_img,                 # [C,H,W]
-        "observation.depths.static1": depth,                      # [1,H,W]
-        "observation.intrinsics.static1": K,                      # [3,3]
-        "observation.task_instr": task_lang,                      # str
+        "observation.state": states,
+        "observation.images.wrist1": wrist_imgs,
+        "observation.images.static1": static_imgs,
+        "observation.depths.static1": depths,
+        "observation.intrinsics.static1": Ks,
+        "observation.task_instr": [task_lang for _ in range(env_num)],
         "dataset_info": {
             "action_type": "joint_velocity",
             "robot_embodiment": "single_arm",
