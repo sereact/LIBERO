@@ -399,7 +399,7 @@ def main():
         f"[info] finish for ckpt at {run_folder} in {t.get_elapsed_time()} sec for rollouts"
     )
     print(f"Results are saved at {save_folder}")
-    print(test_loss, success_rate)
+    print("Loss: ", test_loss, "Success: ", success_rate)
 
 
 if __name__ == "__main__":
