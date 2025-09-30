@@ -80,14 +80,18 @@ def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
         "observation.intrinsics.static1": Ks,
         "observation.task_instr": [task_lang for _ in range(env_num)],
         "dataset_info": {
-            "action_type": "joint_velocity",
+            "action_type": "joint_state",
             "robot_embodiment": "single_arm",
-            "robot_type": "Panda",
+            "robot_type": "franka",
             "stereo_replace_depth": True,
             "handheld": False,
             "no_state": False,
             "action_dof": 7,
         },
+        # "inference_config": {
+        #     "n_actions": 50,
+        #     "n_inference_steps": 20,
+        # }
     }
     return data
 

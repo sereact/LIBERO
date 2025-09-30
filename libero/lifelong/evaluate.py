@@ -57,8 +57,6 @@ import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.tensor_utils as TensorUtils
 
 import time
-
-# from types import SimpleNamespace
 from attrdict import AttrDict
 
 # Add this small helper near the top (after imports)
@@ -139,6 +137,11 @@ def parse_args():
 
 
 def main():
+    # REMOVE LATER
+    # ============
+    expert_actions = torch.load("episode0_actions.pt")
+    # ============
+
     args = parse_args()
     # e.g., experiments/LIBERO_SPATIAL/Multitask/BCRNNPolicy_seed100/
 
@@ -265,6 +268,8 @@ def main():
         f"{args.benchmark}_{args.algo}_{args.policy}_{args.seed}_load{args.load_task}_on{args.task_id}_videos",
     )
 
+    print("Language Instruction: ", task.language)
+
     with Timer() as t, VideoWriter(video_folder, args.save_videos) as video_writer:
         env_args = {
             "bddl_file_name": os.path.join(
@@ -319,8 +324,8 @@ def main():
         temp_env.close()
         # >>> end added block
 
-        env_num = 20
-        # env_num = 1
+        # env_num = 20
+        env_num = 1
 
         env = SubprocVectorEnv(
             [lambda: OffScreenRenderEnv(**env_args) for _ in range(env_num)]
@@ -357,12 +362,18 @@ def main():
             while steps < cfg.eval.max_steps:
                 steps += 1
 
-                if args.policy == "external_api_policy":
-                    data = raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang)
-                else:
-                    data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
+                # if args.policy == "external_api_policy":
+                #     data = raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang)
+                # else:
+                #     data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
                 
-                actions = algo.policy.get_action(data)
+                # actions = algo.policy.get_action(data)
+                
+                if steps == len(expert_actions):
+                    break
+                
+                actions = expert_actions[steps][[0]].repeat(env_num, 1).cpu().numpy()
+
                 prev_obs = obs
                 obs, reward, done, info = env.step(actions)
 
