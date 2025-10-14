@@ -20,3 +20,6 @@ libero.egg-info/
 .venv
 .venv_lerobot
 lerobot
+
+*.csv
+*.pt

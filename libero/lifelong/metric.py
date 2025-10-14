@@ -15,85 +15,204 @@ from libero.libero.utils.time_utils import Timer
 from libero.libero.utils.video_utils import VideoWriter
 from libero.lifelong.utils import *
 
+# import math
 
-import torch
+# def _quat_wxyz_to_R(q):
+#     """Quaternion (w,x,y,z) -> 3x3 rotation matrix."""
+#     w, x, y, z = [float(v) for v in q]
+#     # normalize
+#     n = (w*w + x*x + y*y + z*z) ** 0.5 + 1e-12
+#     w, x, y, z = w/n, x/n, y/n, z/n
+#     return torch.tensor([
+#         [1 - 2*(y*y + z*z),   2*(x*y - z*w),     2*(x*z + y*w)],
+#         [  2*(x*y + z*w),   1 - 2*(x*x + z*z),   2*(y*z - x*w)],
+#         [  2*(x*z - y*w),     2*(y*z + x*w),   1 - 2*(x*x + y*y)]
+#     ], dtype=torch.float64)
+
+# def _R_to_euler_zyx(R):
+#     """Rotation matrix -> (yaw, pitch, roll) with ZYX convention, radians."""
+#     r00,r01,r02 = R[0]; r10,r11,r12 = R[1]; r20,r21,r22 = R[2]
+#     yaw   = math.atan2(r10, r00)
+#     pitch = math.asin(float(-r20))
+#     roll  = math.atan2(r21, r22)
+#     return torch.tensor([yaw, pitch, roll], dtype=torch.float32)
+
+# def _wrap_pi(a):
+#     return ((a + math.pi) % (2*math.pi)) - math.pi
+
+# def _eef8_from(o, tool_frame="identity"):
+#     """
+#     Build [x,y,z,yaw,pitch,roll,gripL,gripR] from one obs dict.
+#     Expects:
+#       - 'robot0_eef_pos'        (3,)
+#       - 'robot0_eef_quat'       (4,) in wxyz
+#       - 'robot0_gripper_qpos'   (>=2,)
+#     """
+#     pos  = torch.as_tensor(o["robot0_eef_pos"], dtype=torch.float32)
+#     quat = torch.as_tensor(o["robot0_eef_quat"], dtype=torch.float64)  # wxyz
+#     R = _quat_wxyz_to_R(quat)
+
+#     # Optional fixed tool-frame adjustment (common 180° flips)
+#     if tool_frame == "flip_z":
+#         R_off = torch.tensor([[-1.,0.,0.],[0.,-1.,0.],[0.,0.,1.]], dtype=torch.float64)
+#         R = R_off @ R
+#     elif tool_frame == "flip_x":
+#         R_off = torch.tensor([[1.,0.,0.],[0.,-1.,0.],[0.,0.,-1.]], dtype=torch.float64)
+#         R = R_off @ R
+#     elif tool_frame != "identity":
+#         raise ValueError("tool_frame must be 'identity', 'flip_z', or 'flip_x'")
+
+#     ypr = _R_to_euler_zyx(R)
+#     ypr = torch.tensor([_wrap_pi(v.item()) for v in ypr], dtype=torch.float32)
+
+#     grip = torch.as_tensor(o["robot0_gripper_qpos"], dtype=torch.float32)[:2]
+#     return torch.cat([pos, ypr, grip], dim=0)  # [8]
+
+import robosuite.utils.transform_utils as T  # robosuite's canonical conversions
+
+def obs_batch_to_libero_robot_state(obs):
+    """
+    Convert a batch of robosuite-based LIBERO observations into LIBERO dataset 'state' format:
+        [ x, y, z, rx, ry, rz, g1, g2 ]
+    where (rx, ry, rz) is axis–angle (rotation vector) in radians.
+
+    Args:
+        obs_batch: sequence (list/tuple/np.ndarray) of observation dicts, each containing:
+            - 'robot0_eef_pos'   : (3,) float  (meters, world/base frame)
+            - 'robot0_eef_quat'  : (4,) float  (quaternion, **xyzw** in robosuite obs)
+            - 'robot0_gripper_qpos': (2,) float (left/right finger joint positions)
+    Returns:
+        torch.Tensor with shape (8)
+    """
+
+
+    # 1) Position (3,)
+    pos = np.asarray(obs["robot0_eef_pos"], dtype=np.float64)
+
+    # 2) Orientation: quaternion (robosuite uses xyzw in observations)
+    quat_xyzw = np.asarray(obs["robot0_eef_quat"], dtype=np.float64)
+    # Convert to axis–angle (rotation vector, 3,)
+    rotvec = T.quat2axisangle(quat_xyzw).astype(np.float64)
+
+    # 3) Gripper qpos (2,)
+    grip = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float64).reshape(2)
+
+    out = np.concatenate([pos, rotvec, grip], axis=0).astype(np.float32)
+
+    return torch.from_numpy(out)
+
+def _rgb_to_chw01(img_np):
+    t = torch.from_numpy(img_np).permute(2,0,1).contiguous()
+    if t.dtype != torch.float32:
+        t = t.float()
+    if t.max() > 1.0:
+        t = t / 255.0
+    return t  # [C,H,W], float32 in [0,1]
+
+def _depth_to_1hw(depth_np):
+    t = torch.from_numpy(depth_np)
+    if t.ndim == 2:               # HxW
+        t = t.unsqueeze(0)
+    elif t.ndim == 3 and t.shape[-1] == 1:  # HxWx1
+        t = t.permute(2,0,1)
+    elif t.ndim == 3 and t.shape[0] == 1:   # 1xHxW
+        pass
+    else:
+        raise ValueError(f"Unexpected depth shape: {tuple(t.shape)}")
+    return t.float()  # [1,H,W]
 
 def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
     """
-    Multi-env converter:
-      - observation.state: [env, 2, DOF] (t, t-0.1s)
-      - observation.images.wrist1: [env, C, H, W] in [0,1] from robot0_eye_in_hand_image
-      - observation.images.static1: [env, C, H, W] in [0,1] from agentview_image
+    Multi-env converter to match HF/LeRobot LIBERO:
+      - observation.state: [env, 2, 8] = [t, t_prev] of [x,y,z,yaw,pitch,roll,gripL,gripR]
+      - observation.images.wrist1: [env, C, H, W] from robot0_eye_in_hand_image (RGB in [0,1])
+      - observation.images.static1: [env, C, H, W] from agentview_image (RGB in [0,1])
       - observation.depths.static1: [env, 1, H, W] from agentview_depth
-      - observation.intrinsics.static1: [env, 3, 3] from camera_intrinsics["agentview"]["intrinsic_matrix_K"]
-      - observation.task_instr: [env] list[str], one per env (same string repeated if shared)
-      - dataset_info: fixed dict (not batched)
+      - observation.intrinsics.static1: [env, 3, 3] from camera_intrinsics['agentview']['intrinsic_matrix_K']
+      - observation.task_instr: [env] list[str]
     """
+    
+    env_num = len(obs)
+    assert len(prev_obs) == env_num, "prev_obs must have the same length as obs"
+    
+    states      = [torch.stack([obs_batch_to_libero_robot_state(obs[k]),
+                                obs_batch_to_libero_robot_state(prev_obs[k])], dim=0) for k in range(env_num)]
+    wrist_imgs  = [_rgb_to_chw01(obs[k]["robot0_eye_in_hand_image"][::-1, ::-1].copy()) for k in range(env_num)]
+    static_imgs = [_rgb_to_chw01(obs[k]["agentview_image"][::-1, ::-1].copy()) for k in range(env_num)]
+    depths      = [_depth_to_1hw(obs[k]["agentview_depth"])         for k in range(env_num)]
+    Ks          = [torch.as_tensor(obs[k]["camera_intrinsics"]["agentview"]["intrinsic_matrix_K"],
+                                   dtype=torch.float32)
+                   for k in range(env_num)]
+    
+    data = {
+        "observation.state":             torch.stack(states, dim=0),       # [env, 2, 8]
+        "observation.images.wrist1":     torch.stack(wrist_imgs, dim=0),   # [env, C, H, W]
+        "observation.images.static1":    torch.stack(static_imgs, dim=0),  # [env, C, H, W]
+        # "observation.depths.static1":    torch.stack(depths, dim=0),       # [env, 1, H, W]
+        # "observation.intrinsics.static1":torch.stack(Ks, dim=0),           # [env, 3, 3]
+        "observation.task_instr":        [task_lang] * env_num,
+        "dataset_info": {
+            "action_type": "eef",
+            "robot_embodiment": "single_arm",
+            "robot_type": "franka",
+            "stereo_replace_depth": False,
+            "handheld": False,
+            "no_state": False,
+            "obs_dof": 8,
+            "action_dof": 7,
+        },
+        "inference_config": {
+            "n_actions": 4,
+            "n_inference_steps": 10,
+        },
+    }
+    return data
+
+    # New per-env list-of-dicts implementation
     env_num = len(obs)
     assert len(prev_obs) == env_num, "prev_obs must have the same length as obs"
 
-    states = []
-    wrist_imgs = []
-    static_imgs = []
-    depths = []
-    Ks = []
-    # prepare per-env tensors
+    items = []
     for k in range(env_num):
-        o = obs[k]
-        p = prev_obs[k]
+        state_cur  = obs_batch_to_libero_robot_state(obs[k])
+        state_prev = obs_batch_to_libero_robot_state(prev_obs[k])
+        state = torch.stack([state_cur, state_prev], dim=0)  # [2, 8]
 
-        # state [2, dof]
-        joint_pos = torch.from_numpy(o["robot0_joint_pos"]).float()
-        joint_pos_prev = torch.from_numpy(p["robot0_joint_pos"]).float()
-        state = torch.stack([joint_pos, joint_pos_prev], dim=0)
-        states.append(state)
+        wrist_img  = _rgb_to_chw01(obs[k]["robot0_eye_in_hand_image"][::-1, ::-1].copy())
+        static_img = _rgb_to_chw01(obs[k]["agentview_image"][::-1, ::-1].copy())
 
-        # wrist1 image [C,H,W] in [0,1]
-        wrist_img = torch.from_numpy(o["robot0_eye_in_hand_image"]).permute(2, 0, 1).float() / 255.0
-        wrist_imgs.append(wrist_img)
+        # Optional extras (kept similar to old version but not included by default)
+        depth = _depth_to_1hw(obs[k]["agentview_depth"])
+        K = torch.as_tensor(
+            obs[k]["camera_intrinsics"]["agentview"]["intrinsic_matrix_K"],
+            dtype=torch.float32,
+        )
 
-        # static1 rgb [C,H,W] in [0,1]
-        static_img = torch.from_numpy(o["agentview_image"]).permute(2, 0, 1).float() / 255.0
-        static_imgs.append(static_img)
+        item = {
+            "observation.state":          state,       # [2, 8]
+            "observation.images.wrist1":  wrist_img,   # [C, H, W]
+            "observation.images.static1": static_img,  # [C, H, W]
+            # "observation.depths.static1":    depth,   # [1, H, W]
+            # "observation.intrinsics.static1": K,      # [3, 3]
+            "observation.task_instr":     task_lang,
+            "dataset_info": {
+                "action_type": "eef",
+                "robot_embodiment": "single_arm",
+                "robot_type": "franka",
+                "stereo_replace_depth": False,
+                "handheld": False,
+                "no_state": False,
+                "obs_dof": 8,
+                "action_dof": 7,
+            },
+            "inference_config": {
+                "n_actions": 4,
+                "n_inference_steps": 10,
+            },
+        }
+        items.append(item)
 
-        # static1 depth [1,H,W]
-        depth = torch.from_numpy(o["agentview_depth"]).permute(2, 0, 1).float()
-        depths.append(depth)
-
-        # intrinsics [3,3]
-        cam_intr = o["camera_intrinsics"]
-        K = torch.tensor(cam_intr["agentview"]["intrinsic_matrix_K"]).float()
-        Ks.append(K)
-
-    # stack along batch dimension
-    states = torch.stack(states, dim=0)            # [env, 2, dof]
-    wrist_imgs = torch.stack(wrist_imgs, dim=0)    # [env, C, H, W]
-    static_imgs = torch.stack(static_imgs, dim=0)  # [env, C, H, W]
-    depths = torch.stack(depths, dim=0)            # [env, 1, H, W]
-    Ks = torch.stack(Ks, dim=0)                    # [env, 3, 3]
-
-    data = {
-        "observation.state": states,
-        "observation.images.wrist1": wrist_imgs,
-        "observation.images.static1": static_imgs,
-        "observation.depths.static1": depths,
-        "observation.intrinsics.static1": Ks,
-        "observation.task_instr": [task_lang for _ in range(env_num)],
-        "dataset_info": {
-            "action_type": "joint_state",
-            "robot_embodiment": "single_arm",
-            "robot_type": "franka",
-            "stereo_replace_depth": True,
-            "handheld": False,
-            "no_state": False,
-            "action_dof": 7,
-        },
-        # "inference_config": {
-        #     "n_actions": 50,
-        #     "n_inference_steps": 20,
-        # }
-    }
-    return data
+    return items
 
 
 def raw_obs_to_tensor_obs(obs, task_emb, cfg):

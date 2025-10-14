@@ -1,198 +1,191 @@
-# run_all_libero.py
-import argparse
-import os
-import re
-import subprocess
-import sys
+# run_all_libero_mgpu_simple.py
+import argparse, os, re, subprocess, sys, threading, queue
 from pathlib import Path
 from statistics import mean
 from tqdm import tqdm
-from time import sleep  # added
 
+# Edit suites/tasks here
 BENCHMARKS = {
     # "libero_spatial": list(range(10)),
     # "libero_object":  list(range(10)),
-    # "libero_goal":    list(range(10)),
-    "libero_10":    list(range(10)),  # the "Long" column in MolmoAct
+    "libero_goal":    list(range(4)),
+    # "libero_10":      list(range(10)),
 }
 
 SUCCESS_PATTERNS = [
-    r"Success(?: Rate)?:\s*([0-9]*\.?[0-9]+)",         # e.g., "Success: 0.72" or "Success Rate: 72.0"
-    r"success[_\s]rate\s*[:=]\s*([0-9]*\.?[0-9]+)",    # common variation
+    r"Success(?: Rate)?:\s*([0-9]*\.?[0-9]+)",
+    r"success[_\s]rate\s*[:=]\s*([0-9]*\.?[0-9]+)",
 ]
 
-def run_cmd(cmd, logfile):
-    logfile.parent.mkdir(parents=True, exist_ok=True)
-    with logfile.open("w") as f:
-        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
-        ret = proc.wait()
-    return ret
-
-# new: async launcher that keeps the logfile open while the process runs
-def run_cmd_async(cmd, logfile):
-    logfile.parent.mkdir(parents=True, exist_ok=True)
-    f = logfile.open("w")
-    proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
-    return proc, f
-
-def parse_success(log_text):
-    # try to find the last mentioned success number in the log
-    found_vals = []
+def parse_success(text: str):
+    vals = []
     for pat in SUCCESS_PATTERNS:
-        for m in re.finditer(pat, log_text, flags=re.IGNORECASE):
+        for m in re.finditer(pat, text, flags=re.IGNORECASE):
             try:
-                found_vals.append(float(m.group(1)))
+                vals.append(float(m.group(1)))
             except Exception:
                 pass
-    if not found_vals:
-        return None
-    return found_vals[-1]
+    return vals[-1] if vals else None
+
+def run_one(cmd, logfile: Path, timeout_s: int, extra_env: dict):
+    logfile.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.update(extra_env or {})
+    with logfile.open("w") as f:
+        try:
+            res = subprocess.run(
+                cmd, stdout=f, stderr=subprocess.STDOUT,
+                check=False, timeout=timeout_s if timeout_s and timeout_s > 0 else None,
+                env=env
+            )
+            return res.returncode, False
+
+        except subprocess.TimeoutExpired:
+            try: f.write(f"\n[TIMEOUT] Exceeded {timeout_s}s. Process was killed.\n")
+            except Exception: pass
+            return -9, True
+
+def worker(gpu_id: int, task_q: "queue.Queue[tuple]", results: list, res_lock: threading.Lock,
+           pbar: tqdm, args):
+    while True:
+        try:
+            bench, task_id, seed, log_file = task_q.get_nowait()
+        except queue.Empty:
+            return
+
+        # Mask this child to one GPU; use device_id=0 inside the masked view.
+        env = {
+            "CUDA_VISIBLE_DEVICES": str(gpu_id),
+            "MUJOCO_GL": "egl",
+            "PYOPENGL_PLATFORM": "egl",
+            "MUJOCO_EGL_DEVICE_ID": str(gpu_id),
+            "EGL_DEVICE_ID": str(gpu_id),
+            "TOKENIZERS_PARALLELISM": "false",
+        }
+
+        cmd = [
+            args.python_bin, args.eval_script,
+            "--benchmark", bench,
+            "--task_id", str(task_id),
+            "--algo", args.algo,
+            "--policy", args.policy,
+            "--seed", str(seed),
+            "--load_task", str(args.load_task),
+            "--device_id", "0",             # 0 within the masked GPU
+            "--envs", str(args.envs),
+        ]
+        if args.save_videos:
+            cmd += ["--save-videos"]
+
+        if args.verbose:
+            tqdm.write(f"[GPU {gpu_id}] " + " ".join(cmd))
+
+        rc, timed_out = run_one(cmd, log_file, args.timeout, env)
+
+        with res_lock:
+            results.append((bench, task_id, seed, rc, timed_out, gpu_id))
+            if rc != 0:
+                msg = "timeout" if timed_out else f"nonzero exit {rc}"
+                tqdm.write(f"[warn][GPU {gpu_id}] {bench} task {task_id} {msg}")
+            pbar.update(1)
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--policy", default="external_api_policy")
-    parser.add_argument("--algo", default="base")
-    parser.add_argument("--seed", default="100")
-    parser.add_argument("--load_task", type=int, default=0)
-    parser.add_argument("--device_id", type=int, default=0)
-    parser.add_argument("--save-videos", action="store_true")
-    parser.add_argument("--python_bin", default=sys.executable)
-    parser.add_argument("--eval_script", default="libero/lifelong/evaluate.py")
-    parser.add_argument("--outdir", default="runs_libero_external_api")
-    # new: limit concurrency
-    parser.add_argument("--jobs", type=int, default=1,
-                        help="Max number of concurrent evaluation processes")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--policy", default="external_api_policy")
+    ap.add_argument("--algo", default="base")
+    ap.add_argument("--seed", default="100")
+    ap.add_argument("--load_task", type=int, default=0)
+    ap.add_argument("--save-videos", action="store_true")
+    ap.add_argument("--python_bin", default=sys.executable)
+    ap.add_argument("--eval_script", default="libero/lifelong/evaluate.py")
+    ap.add_argument("--outdir", default="runs_libero_external_api")
 
-    seed = int(args.seed.strip())
+    # Multi-GPU scheduling
+    ap.add_argument("--gpus", type=str, required=True, help="e.g. 0,1,2,3")
+    ap.add_argument("--jobs-per-gpu", type=int, default=1, help="slots per GPU (start with 1)")
 
+    # Evaluate.py pass-through
+    ap.add_argument("--envs", type=int, default=1, help="MuJoCo envs per eval (1 is safest)")
+
+    # Reliability / UX
+    ap.add_argument("--timeout", type=int, default=0, help="Per-task timeout (0 = no timeout)")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    seed = int(str(args.seed).strip())
     outdir = Path(args.outdir)
     logs_dir = outdir / "logs"
     csv_path = outdir / "results.csv"
     summary_path = outdir / "summary_by_suite.csv"
 
-    rows = []
-    # 1) run evaluations in parallel
+    gpus = [int(x) for x in args.gpus.replace(" ", "").split(",") if x != ""]
+    if not gpus:
+        print("[error] No GPUs parsed from --gpus"); sys.exit(1)
+
+    # Queue up all tasks
+    task_q: "queue.Queue[tuple]" = queue.Queue()
     benches_items = list(BENCHMARKS.items())
-    tasks = []
     for bench, task_ids in benches_items:
         for task_id in task_ids:
             log_file = logs_dir / bench / f"task_{task_id}" / f"seed_{seed}.log"
-            cmd = [
-                args.python_bin, args.eval_script,
-                "--benchmark", bench,
-                "--task_id", str(task_id),
-                "--algo", args.algo,
-                "--policy", args.policy,
-                "--seed", str(seed),
-                "--load_task", str(args.load_task),
-                "--device_id", str(args.device_id),
-            ]
-            if args.save_videos:
-                cmd += ["--save-videos"]
-            tasks.append({
-                "bench": bench,
-                "task_id": task_id,
-                "logfile": log_file,
-                "cmd": cmd,
-            })
+            task_q.put((bench, task_id, seed, log_file))
 
-    tqdm.write(f"Submitting {len(tasks)} jobs with up to {args.jobs} concurrent processes.")
+    total = task_q.qsize()
+    tqdm.write(f"Scheduling {total} jobs across GPUs {gpus} with {args.jobs_per_gpu} slot(s) / GPU.")
     tqdm.write(f"Tail logs with: tail -f {logs_dir}/<suite>/task_<id>/seed_{seed}.log")
 
-    total = len(tasks)
-    active = {}  # proc -> (task, file_handle)
-    started = 0
-    pbar = tqdm(total=total, desc="Running jobs", unit="job")
-    try:
-        while started < total or active:
-            # launch new ones up to limit
-            while started < total and len(active) < args.jobs:
-                t = tasks[started]
-                started += 1
-                tqdm.write("Starting: " + " ".join(t["cmd"]))
-                proc, fh = run_cmd_async(t["cmd"], t["logfile"])
-                active[proc] = (t, fh)
+    # Start workers: one thread per slot, each pinned to a specific GPU id
+    results = []  # (bench, task_id, seed, returncode, timed_out, gpu_id)
+    res_lock = threading.Lock()
+    threads = []
+    with tqdm(total=total, desc="Running jobs", unit="job") as pbar:
+        for gpu in gpus:
+            for _ in range(max(1, args.jobs_per_gpu)):
+                t = threading.Thread(target=worker,
+                                     args=(gpu, task_q, results, res_lock, pbar, args),
+                                     daemon=True)
+                t.start()
+                threads.append(t)
+        for t in threads:
+            t.join()
 
-            # check for finished
-            finished = [p for p in list(active.keys()) if p.poll() is not None]
-            for p in finished:
-                t, fh = active.pop(p)
-                try:
-                    fh.close()
-                except Exception:
-                    pass
-                if p.returncode != 0:
-                    tqdm.write(f"[warn] nonzero exit code {p.returncode} for {t['bench']} task {t['task_id']} seed {seed}")
-                pbar.update(1)
-
-            if active or started < total:
-                sleep(0.2)
-    except KeyboardInterrupt:
-        tqdm.write("KeyboardInterrupt received, terminating running jobs...")
-        for p in list(active.keys()):
-            try:
-                p.terminate()
-            except Exception:
-                pass
-        for p in list(active.keys()):
-            try:
-                p.wait(timeout=5)
-            except Exception:
-                pass
-        # ensure files are closed
-        for p, (_, fh) in list(active.items()):
-            try:
-                fh.close()
-            except Exception:
-                pass
-        raise
-    finally:
-        pbar.close()
-        # best-effort to close any remaining file handles
-        for _, (_, fh) in list(active.items()):
-            try:
-                fh.close()
-            except Exception:
-                pass
-
-    # 2) parse logs (optional progress)
-    for bench, task_ids in tqdm(benches_items, desc="Parsing benchmarks", unit="bench"):
-        for task_id in tqdm(task_ids, desc=f"Parsing {bench} tasks", unit="task", leave=False):
+    # Parse logs for success
+    rows = []
+    for bench, task_ids in benches_items:
+        for task_id in task_ids:
             log_file = logs_dir / bench / f"task_{task_id}" / f"seed_{seed}.log"
             success = None
             if log_file.exists():
                 text = log_file.read_text(errors="ignore")
                 success = parse_success(text)
-                # Some code prints percentages, some fractions; normalize if looks like percentage
                 if success is not None and success > 1.0:
-                    success = success / 100.0
+                    success /= 100.0
             rows.append((bench, task_id, seed, success))
 
-    # 3) write CSV of raw results
+    # Write raw results CSV (+ returncode/timeout/gpu)
     outdir.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w") as f:
-        f.write("benchmark,task_id,seed,success\n")
+    rc_map = {(b, t): (rc, to, gpu) for (b, t, _, rc, to, gpu) in results}
+    with (csv_path).open("w") as f:
+        f.write("benchmark,task_id,seed,success,returncode,timed_out,gpu\n")
         for bench, task_id, seed, success in rows:
-            s = "" if success is None else f"{success:.6f}"
-            f.write(f"{bench},{task_id},{seed},{s}\n")
+            rc, to, gpu = rc_map.get((bench, task_id), (None, False, None))
+            f.write(f"{bench},{task_id},{seed},{'' if success is None else f'{success:.6f}'},"
+                    f"{'' if rc is None else rc},{1 if to else 0},{'' if gpu is None else gpu}\n")
 
-    # 4) write per suite means (averaged over tasks and seeds)
+    # Per-suite means
     by_suite = {}
     for bench in BENCHMARKS:
         vals = [r[3] for r in rows if r[0] == bench and r[3] is not None]
         by_suite[bench] = (mean(vals) if vals else None)
-
-    with summary_path.open("w") as f:
+    with (summary_path).open("w") as f:
         f.write("suite,mean_success\n")
         for bench in BENCHMARKS:
             ms = by_suite[bench]
-            s = "" if ms is None else f"{ms:.6f}"
-            f.write(f"{bench},{s}\n")
+            f.write(f"{bench},{'' if ms is None else f'{ms:.6f}'}\n")
 
     print(f"\nWrote raw results to: {csv_path}")
     print(f"Wrote per suite means to: {summary_path}")
-    print("Tip: map suites to MolmoAct columns as Spatial=libero_spatial, Object=libero_object, Goal=libero_goal, Long=libero_long")
+    print("Tip: map suites → MolmoAct columns: Spatial=libero_spatial, Object=libero_object, Goal=libero_goal, Long=libero_long")
 
 if __name__ == "__main__":
     main()

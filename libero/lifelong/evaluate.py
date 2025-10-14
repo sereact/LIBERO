@@ -120,6 +120,8 @@ def parse_args():
     parser.add_argument("--load_task", type=int)
     parser.add_argument("--device_id", type=int)
     parser.add_argument("--save-videos", action="store_true")
+    parser.add_argument("--envs", type=int, default=1)
+
     # parser.add_argument('--save_dir',  type=str, required=True)
     args = parser.parse_args()
     args.device_id = "cuda:" + str(args.device_id)
@@ -139,7 +141,7 @@ def parse_args():
 def main():
     # REMOVE LATER
     # ============
-    expert_actions = torch.load("episode0_actions.pt")
+    expert_actions = torch.load("libero_object_pick_up_the_alphabet_soup_and_place_it_in_the_basket_actions_000005.pt")['actions']
     # ============
 
     args = parse_args()
@@ -279,6 +281,7 @@ def main():
             "camera_widths": cfg.data.img_w,
             "camera_depths": True,
             # "controller": "JOINT_VELOCITY" if cfg.policy == "external_api_policy" else "OSC_POSE",
+            # "control_freq": 20,
         }
 
         # >>> added: pre-compute camera intrinsics using a temporary single env
@@ -324,8 +327,7 @@ def main():
         temp_env.close()
         # >>> end added block
 
-        # env_num = 20
-        env_num = 1
+        env_num = args.envs
 
         env = SubprocVectorEnv(
             [lambda: OffScreenRenderEnv(**env_args) for _ in range(env_num)]
@@ -362,18 +364,20 @@ def main():
             while steps < cfg.eval.max_steps:
                 steps += 1
 
-                # if args.policy == "external_api_policy":
-                #     data = raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang)
-                # else:
-                #     data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
-                
-                # actions = algo.policy.get_action(data)
-                
-                if steps == len(expert_actions):
-                    break
-                
-                actions = expert_actions[steps][[0]].repeat(env_num, 1).cpu().numpy()
+                if steps % 50 == 0:
+                    print(f"Evaluation steps {steps}")
 
+                if args.policy == "external_api_policy":
+                    data = raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang)
+                else:
+                    data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
+
+                actions = algo.policy.get_action(data)
+                
+                # if steps == len(expert_actions):
+                #     break
+                # actions = expert_actions[steps].unsqueeze(0).repeat(env_num, 1).cpu().numpy()
+                
                 prev_obs = obs
                 obs, reward, done, info = env.step(actions)
 
@@ -390,11 +394,14 @@ def main():
                 # check whether succeed
                 for k in range(env_num):
                     dones[k] = dones[k] or done[k]
+
                 if all(dones):
                     break
 
             for k in range(env_num):
                 num_success += int(dones[k])
+
+        print("Num steps: ", steps)
 
         success_rate = num_success / env_num
         env.close()

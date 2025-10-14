@@ -71,6 +71,7 @@ class BasePolicy(nn.Module, metaclass=PolicyMeta):
             **policy_cfg.translation_aug.network_kwargs
         )
         self.img_aug = DataAugGroup((color_aug, translation_aug))
+        self.img_aug.eval()
 
     def forward(self, data):
         """

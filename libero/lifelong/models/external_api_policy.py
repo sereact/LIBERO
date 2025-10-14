@@ -122,7 +122,7 @@ class ExternalAPIPolicy(BasePolicy):
         super().__init__(cfg, shape_meta)
         # Device from cfg if provided (e.g., "cuda:0")
 
-        server_url = "http://localhost:8001"
+        server_url = cfg.policy.server_url
         timeout = 30.0
 
         self.client = LerobotPolicyClient(server_url=server_url, timeout=timeout)
