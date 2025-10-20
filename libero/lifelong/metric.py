@@ -15,59 +15,6 @@ from libero.libero.utils.time_utils import Timer
 from libero.libero.utils.video_utils import VideoWriter
 from libero.lifelong.utils import *
 
-# import math
-
-# def _quat_wxyz_to_R(q):
-#     """Quaternion (w,x,y,z) -> 3x3 rotation matrix."""
-#     w, x, y, z = [float(v) for v in q]
-#     # normalize
-#     n = (w*w + x*x + y*y + z*z) ** 0.5 + 1e-12
-#     w, x, y, z = w/n, x/n, y/n, z/n
-#     return torch.tensor([
-#         [1 - 2*(y*y + z*z),   2*(x*y - z*w),     2*(x*z + y*w)],
-#         [  2*(x*y + z*w),   1 - 2*(x*x + z*z),   2*(y*z - x*w)],
-#         [  2*(x*z - y*w),     2*(y*z + x*w),   1 - 2*(x*x + y*y)]
-#     ], dtype=torch.float64)
-
-# def _R_to_euler_zyx(R):
-#     """Rotation matrix -> (yaw, pitch, roll) with ZYX convention, radians."""
-#     r00,r01,r02 = R[0]; r10,r11,r12 = R[1]; r20,r21,r22 = R[2]
-#     yaw   = math.atan2(r10, r00)
-#     pitch = math.asin(float(-r20))
-#     roll  = math.atan2(r21, r22)
-#     return torch.tensor([yaw, pitch, roll], dtype=torch.float32)
-
-# def _wrap_pi(a):
-#     return ((a + math.pi) % (2*math.pi)) - math.pi
-
-# def _eef8_from(o, tool_frame="identity"):
-#     """
-#     Build [x,y,z,yaw,pitch,roll,gripL,gripR] from one obs dict.
-#     Expects:
-#       - 'robot0_eef_pos'        (3,)
-#       - 'robot0_eef_quat'       (4,) in wxyz
-#       - 'robot0_gripper_qpos'   (>=2,)
-#     """
-#     pos  = torch.as_tensor(o["robot0_eef_pos"], dtype=torch.float32)
-#     quat = torch.as_tensor(o["robot0_eef_quat"], dtype=torch.float64)  # wxyz
-#     R = _quat_wxyz_to_R(quat)
-
-#     # Optional fixed tool-frame adjustment (common 180° flips)
-#     if tool_frame == "flip_z":
-#         R_off = torch.tensor([[-1.,0.,0.],[0.,-1.,0.],[0.,0.,1.]], dtype=torch.float64)
-#         R = R_off @ R
-#     elif tool_frame == "flip_x":
-#         R_off = torch.tensor([[1.,0.,0.],[0.,-1.,0.],[0.,0.,-1.]], dtype=torch.float64)
-#         R = R_off @ R
-#     elif tool_frame != "identity":
-#         raise ValueError("tool_frame must be 'identity', 'flip_z', or 'flip_x'")
-
-#     ypr = _R_to_euler_zyx(R)
-#     ypr = torch.tensor([_wrap_pi(v.item()) for v in ypr], dtype=torch.float32)
-
-#     grip = torch.as_tensor(o["robot0_gripper_qpos"], dtype=torch.float32)[:2]
-#     return torch.cat([pos, ypr, grip], dim=0)  # [8]
-
 import robosuite.utils.transform_utils as T  # robosuite's canonical conversions
 
 def obs_batch_to_libero_robot_state(obs):

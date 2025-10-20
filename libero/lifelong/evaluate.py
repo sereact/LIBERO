@@ -139,14 +139,9 @@ def parse_args():
 
 
 def main():
-    # REMOVE LATER
-    # ============
-    expert_actions = torch.load("libero_object_pick_up_the_alphabet_soup_and_place_it_in_the_basket_actions_000005.pt")['actions']
-    # ============
-
     args = parse_args()
+    
     # e.g., experiments/LIBERO_SPATIAL/Multitask/BCRNNPolicy_seed100/
-
     experiment_dir = os.path.join(
         args.experiment_dir,
         f"{benchmark_map[args.benchmark]}/"

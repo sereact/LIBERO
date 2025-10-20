@@ -75,21 +75,33 @@ class LerobotPolicyClient:
     Expects a POST /predict endpoint accepting msgpack-encoded observations and
     returning msgpack-encoded results (e.g., {"action": [...]}).
     """
-    def __init__(self, server_url: str = "http://localhost:8000", timeout: float = 30.0):
+    def __init__(self, server_url: str = "http://localhost:8000", timeout: float = 30.0, attempts: int = 3):
         self.server_url = server_url.rstrip("/")
         self.session = requests.Session()
         self.timeout = timeout
+        self.attempts = attempts
 
     def predict(self, obs_dict: Dict[str, Any]) -> Dict[str, Any]:
         data = pack_msg(obs_dict)
-        resp = self.session.post(
-            f"{self.server_url}/predict",
-            data=data,
-            headers={"Content-Type": "application/octet-stream"},
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return unpack_msg(resp.content)
+        for attempt in range(1, self.attempts + 1):
+            try:
+                resp = self.session.post(
+                    f"{self.server_url}/predict",
+                    data=data,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                return unpack_msg(resp.content)
+            
+            except Exception as e:
+                print(f"Predict failed, Error occurred: {e}")
+                last_exc = e
+            
+            if attempt < self.attempts:
+                time.sleep(1.0)
+        
+        raise last_exc
 
     def predict_with_timing(self, obs_dict: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
         t0 = time.time()
