@@ -4,19 +4,21 @@ import numpy as np
 
 
 class VideoWriter:
-    def __init__(self, video_path, save_video=False, fps=30, single_video=True):
+    def __init__(self, video_path, save_video=False, fps=30, single_video=True, auto_save=True):
         self.video_path = video_path
         self.save_video = save_video
         self.fps = fps
         self.image_buffer = {}
         self.last_images = {}
         self.single_video = single_video
+        self.auto_save = auto_save
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.save()
+        if self.auto_save:
+            self.save()
 
     def append_image(self, img, idx=0):
         """Directly append an image to the video."""
@@ -75,3 +77,29 @@ class VideoWriter:
                         video_writer.append_data(im)
                     video_writer.close()
             print(f"Saved videos to {self.video_path}.")
+
+    def save_ids(self, ids):
+        """Save videos only for specified environment ids.
+        
+        Args:
+            ids: List of environment ids to save videos for.
+        """
+        if self.save_video:
+            os.makedirs(self.video_path, exist_ok=True)
+            if self.single_video:
+                video_name = os.path.join(self.video_path, f"video.mp4")
+                video_writer = imageio.get_writer(video_name, fps=self.fps)
+                for idx in ids:
+                    if idx in self.image_buffer:
+                        for im in self.image_buffer[idx]:
+                            video_writer.append_data(im)
+                video_writer.close()
+            else:
+                for idx in ids:
+                    if idx in self.image_buffer:
+                        video_name = os.path.join(self.video_path, f"{idx}.mp4")
+                        video_writer = imageio.get_writer(video_name, fps=self.fps)
+                        for im in self.image_buffer[idx]:
+                            video_writer.append_data(im)
+                        video_writer.close()
+            print(f"Saved videos for ids {ids} to {self.video_path}.")

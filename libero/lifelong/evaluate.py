@@ -121,6 +121,7 @@ def parse_args():
     parser.add_argument("--device_id", type=int)
     parser.add_argument("--save-videos", action="store_true")
     parser.add_argument("--envs", type=int, default=1)
+    parser.add_argument("--policy_config", type=str, default=None)
 
     # parser.add_argument('--save_dir',  type=str, required=True)
     args = parser.parse_args()
@@ -140,61 +141,76 @@ def parse_args():
 
 def main():
     args = parse_args()
-    
-    # e.g., experiments/LIBERO_SPATIAL/Multitask/BCRNNPolicy_seed100/
-    experiment_dir = os.path.join(
-        args.experiment_dir,
-        f"{benchmark_map[args.benchmark]}/"
-        + f"{algo_map[args.algo]}/"
-        + f"{policy_map[args.policy]}_seed{args.seed}",
-    )
 
-    # find the checkpoint
-    experiment_id = 0
-    for path in Path(experiment_dir).glob("run_*"):
-        if not path.is_dir():
-            continue
-        try:
-            folder_id = int(str(path).split("run_")[-1])
-            if folder_id > experiment_id:
-                experiment_id = folder_id
-        except BaseException:
-            pass
-    
-    if experiment_id == 0:
-        print(f"[error] cannot find the checkpoint under {experiment_dir}")
-        sys.exit(0)
+    if args.policy_config:
+        cfg_json = args.policy_config
+        if not os.path.isfile(cfg_json):
+            print(f"[error] --policy_config not found: {cfg_json}")
+            sys.exit(1)
+        with open(cfg_json, "r") as f:
+            cfg = _dict_to_obj(json.load(f))
+        sd = {}
+        previous_mask = {}
+        run_folder = str(Path(cfg_json).parent)
+        print(f"[info] loaded config from --policy_config: {cfg_json}")
+    else:
+        # --- original LIBERO discovery / checkpoint path stays as-is ---
+        experiment_dir = os.path.join(
+            args.experiment_dir,
+            f"{benchmark_map[args.benchmark]}/"
+            + f"{algo_map[args.algo]}/"
+            + f"{policy_map[args.policy]}_seed{args.seed}",
+        )
 
-    run_folder = os.path.join(experiment_dir, f"run_{experiment_id:03d}")
-    try:
-        if args.algo == "multitask":
-            model_path = os.path.join(run_folder, f"multitask_model_ep{args.ep}.pth")
-            sd, cfg, previous_mask = torch_load_model(
-                model_path, map_location=args.device_id
-            )
-        else:
-            model_path = os.path.join(run_folder, f"task{args.load_task}_model.pth")
-            sd, cfg, previous_mask = torch_load_model(
-                model_path, map_location=args.device_id
-            )
-    except:
-        if args.policy == "external_api_policy":
-            cfg_json = os.path.join(run_folder, "config.json")
-            with open(cfg_json, "r") as f:
-                cfg = _dict_to_obj(json.load(f))
-            
-            sd = {}
-            previous_mask = {}
-            print(f"[info] no checkpoint found, proceeding with ExternalAPIPolicy using config.json from {cfg_json}")
-        else:
-            print(f"[error] cannot find the checkpoint at {str(model_path)}")
+        # find the checkpoint
+        experiment_id = 0
+        for path in Path(experiment_dir).glob("run_*"):
+            if not path.is_dir(): continue
+            try:
+                folder_id = int(str(path).split("run_")[-1])
+                experiment_id = max(experiment_id, folder_id)
+            except BaseException:
+                pass
+
+        if experiment_id == 0:
+            print(f"[error] cannot find the checkpoint under {experiment_dir}")
             sys.exit(0)
+
+        run_folder = os.path.join(experiment_dir, f"run_{experiment_id:03d}")
+        try:
+            if args.algo == "multitask":
+                model_path = os.path.join(run_folder, f"multitask_model_ep{args.ep}.pth")
+                sd, cfg, previous_mask = torch_load_model(model_path, map_location=args.device_id)
+            else:
+                model_path = os.path.join(run_folder, f"task{args.load_task}_model.pth")
+                sd, cfg, previous_mask = torch_load_model(model_path, map_location=args.device_id)
+        except:
+            if args.policy == "external_api_policy":
+                cfg_json = os.path.join(run_folder, "config.json")
+                with open(cfg_json, "r") as f:
+                    cfg = _dict_to_obj(json.load(f))
+                sd = {}
+                previous_mask = {}
+                print(f"[info] no checkpoint found, proceeding with ExternalAPIPolicy using config.json from {cfg_json}")
+            else:
+                print(f"[error] cannot find the checkpoint at {str(model_path)}")
+                sys.exit(0)
         
     cfg.folder = get_libero_path("datasets")
     cfg.bddl_folder = get_libero_path("bddl_files")
     cfg.init_states_folder = get_libero_path("init_states")
 
+    # Make sure cfg has a device and seed consistent with flags
     cfg.device = args.device_id
+    try:
+        cfg.seed = int(args.seed)
+    except Exception:
+        pass
+
+    # Ensure benchmark_name is set if the config doesn’t include it
+    if not hasattr(cfg, "benchmark_name"):
+        cfg.benchmark_name = benchmark_map[args.benchmark]
+
     algo = safe_device(eval(algo_map[args.algo])(10, cfg), cfg.device)
     algo.policy.previous_mask = previous_mask
 
@@ -265,9 +281,16 @@ def main():
         f"{args.benchmark}_{args.algo}_{args.policy}_{args.seed}_load{args.load_task}_on{args.task_id}_videos",
     )
 
+    video_folder_failed = os.path.join(
+        args.save_dir,
+        f"{args.benchmark}_{args.algo}_{args.policy}_{args.seed}_load{args.load_task}_on{args.task_id}_videos_failed",
+    )
+
     print("Language Instruction: ", task.language)
 
-    with Timer() as t, VideoWriter(video_folder, args.save_videos) as video_writer:
+    with Timer() as t, \
+         VideoWriter(video_folder, args.save_videos) as video_writer, \
+         VideoWriter(video_folder_failed, args.save_videos, single_video=False, auto_save=False) as video_writer_failed:
         env_args = {
             "bddl_file_name": os.path.join(
                 cfg.bddl_folder, task.problem_folder, task.bddl_file
@@ -277,6 +300,7 @@ def main():
             "camera_depths": True,
             # "controller": "JOINT_VELOCITY" if cfg.policy == "external_api_policy" else "OSC_POSE",
             # "control_freq": 20,
+            "render_gpu_device_id": int(str(args.device_id).split(":")[-1]),
         }
 
         # >>> added: pre-compute camera intrinsics using a temporary single env
@@ -368,11 +392,8 @@ def main():
                     data = raw_obs_to_tensor_obs(obs, task_emb, cfg)
 
                 actions = algo.policy.get_action(data)
-                
-                # if steps == len(expert_actions):
-                #     break
-                # actions = expert_actions[steps].unsqueeze(0).repeat(env_num, 1).cpu().numpy()
-                
+                # actions = np.zeros((env_num, 7)) + 0.1  # zero actions for ExternalAPIPolicy              
+
                 prev_obs = obs
                 obs, reward, done, info = env.step(actions)
 
@@ -383,6 +404,9 @@ def main():
                 # >>> end added
 
                 video_writer.append_vector_obs(
+                    obs, dones, camera_name="agentview_image"
+                )
+                video_writer_failed.append_vector_obs(
                     obs, dones, camera_name="agentview_image"
                 )
 
@@ -400,6 +424,15 @@ def main():
 
         success_rate = num_success / env_num
         env.close()
+
+        # Identify failed environment ids
+        failed_ids = [k for k in range(env_num) if not dones[k]]
+        
+        # Save only failed attempts using save_ids
+        if failed_ids:
+            video_writer_failed.save_ids(failed_ids)
+        else:
+            print("No failed attempts to save.")
 
         eval_stats = {
             "loss": test_loss,

@@ -109,7 +109,7 @@ def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
             "action_dof": 7,
         },
         "inference_config": {
-            "n_actions": 4,
+            "n_actions": 6,
             "n_inference_steps": 10,
         },
     }
@@ -153,7 +153,7 @@ def raw_obs_to_tensor_lerobot_obs(obs, prev_obs, task_lang):
                 "action_dof": 7,
             },
             "inference_config": {
-                "n_actions": 4,
+                "n_actions": 10,
                 "n_inference_steps": 10,
             },
         }
